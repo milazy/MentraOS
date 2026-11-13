@@ -197,7 +197,26 @@ class STTTools {
         }
         defaults.set(ActivationState.loaded.rawValue, forKey: activationStateKey)
         defaults.synchronize()
+
+        // G2 LABS root-cause fix (spurious "model failed" rollbacks): the guard used to stay
+        // armed until the model emitted NON-EMPTY text. In a quiet room that can take minutes,
+        // and the guard flips to "testing" around every decoder call — the CPU-dominant part of
+        // the loop. Any iOS termination in that window (background kill, memory pressure,
+        // swipe-close, Xcode stop) was then misread as a decoder crash and the user's model was
+        // silently replaced by Italian Built-in. A decoder that has returned this many real
+        // streaming passes in-process has proven it does not crash on live input.
+        candidateDecodeReturns += 1
+        if candidateDecodeReturns >= trustedDecodeReturnThreshold {
+            Bridge.log("STT crash guard: \(candidateDecodeReturns) live decoder passes returned; trusting model")
+            candidateDecodeReturns = 0
+            markCurrentModelReady()
+        }
     }
+
+    /// In-process count of decoder passes that returned for the current candidate.
+    private static var candidateDecodeReturns = 0
+    /// ~150 passes ≈ several seconds of streamed audio for Zipformer/Kroko/Nemotron chunks.
+    static let trustedDecodeReturnThreshold = 150
 
     /// The candidate survived native construction and at least one real decoder
     /// pass and produced actual text. It can now become the rollback target.
