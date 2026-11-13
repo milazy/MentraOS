@@ -113,6 +113,12 @@ private enum OsEventType: Int32 {
     case abnormalExit = 6
     case systemExit = 7
     case imuDataReport = 8 // IMU_DATA_REPORT — Sys_ItemEvent carries imuData
+    // Even Hub SDK 0.0.14+: LONG_PRESS_EVENT / LONG_PRESS_RELEASE_EVENT. Delivered as a SysEvent
+    // with no eventSource. The OS reserves "tap then long press" for its own contextual menu,
+    // so a plain long press is an enhancement only — every action it triggers must also be
+    // reachable from a menu item. Older firmware never sends these values.
+    case longPress = 9
+    case longPressRelease = 10
 }
 
 /// g2_settingCommandId from g2_setting.proto
@@ -1525,6 +1531,8 @@ class G2: NSObject, SGCManager {
 
     /// Reconnection
     private let reconnectionManager = G2ReconnectionManager()
+    /// Surviving-arm identifiers we cancelled ourselves after the other arm dropped.
+    private var pairedArmCancelIds = Set<UUID>()
 
     // Protocol state
     private let sendManager = G2SendManager()
@@ -2015,6 +2023,9 @@ class G2: NSObject, SGCManager {
         startHeartbeats()
 
         Task { await self.reconnectionManager.stop() }
+        // Both arms are authenticated: any outstanding cancel-echo marker is stale and must not
+        // swallow a future genuine disconnect.
+        pairedArmCancelIds.removeAll()
         Bridge.log("G2: Auth sequence complete, glasses ready")
 
         // Set device_name so DeviceManager can save it for reconnection
@@ -3678,6 +3689,7 @@ class G2: NSObject, SGCManager {
     func disconnect() {
         Bridge.log("G2: disconnect()")
         isDisconnecting = true
+        pairedArmCancelIds.removeAll()
         clearDisplay()
         cancelPairingTimeout()
         stopHeartbeats()
@@ -4199,8 +4211,20 @@ class G2: NSObject, SGCManager {
         rightPeripheral = right
         left.delegate = self
         right.delegate = self
-        centralManager?.connect(left, options: nil)
-        centralManager?.connect(right, options: nil)
+        // iOS pending connects never time out: they complete as soon as the arm advertises,
+        // including while G2 LABS is backgrounded (bluetooth-central). Keep both pending.
+        let pendingOptions: [String: Any] = [
+            CBConnectPeripheralOptionNotifyOnConnectionKey: true,
+            CBConnectPeripheralOptionNotifyOnDisconnectionKey: true,
+        ]
+        if left.state != .connected { centralManager?.connect(left, options: pendingOptions) }
+        if right.state != .connected { centralManager?.connect(right, options: pendingOptions) }
+        // A peripheral iOS still reports as connected will not call didConnect again, so start
+        // its discovery/auth path directly instead of waiting forever.
+        for arm in [left, right] where arm.state == .connected {
+            Bridge.log("G2: connectByUUID - \(arm.name ?? "arm") already connected; rediscovering services")
+            arm.discoverServices(nil)
+        }
         return true
     }
 
@@ -4674,11 +4698,12 @@ class G2: NSObject, SGCManager {
                 // G2 LABS interaction:
                 //   Captions stopped -> double tap opens native dashboard.
                 //   Captions running -> JS receives this same double_tap and
-                //   stops/clears Captions; do NOT flash the dashboard first.
+                //   opens the G2 LABS overlay menu on top of live captions
+                //   (recognition keeps running); do NOT flash the dashboard.
                 let g2CaptionsActive =
                     DeviceStore.shared.get("bluetooth", "g2_captions_active") as? Bool ?? false
                 if g2CaptionsActive {
-                    Bridge.log("G2 LABS: double tap while Captions active -> stop/close handled by JS")
+                    Bridge.log("G2 LABS: double tap while Captions active -> overlay menu handled by JS")
                     return
                 }
 
@@ -4775,6 +4800,8 @@ class G2: NSObject, SGCManager {
         case .foregroundExit: return "foreground_exit"
         case .systemExit: return "system_exit"
         case .imuDataReport: return nil
+        case .longPress: return "long_press"
+        case .longPressRelease: return "long_press_release"
         case .abnormalExit: return nil // don't report abnormal exits as gestures
         }
     }
@@ -5240,6 +5267,29 @@ extension G2: CBCentralManagerDelegate {
 
             // Only reconnect if not intentionally disconnecting
             if self.isDisconnecting { return }
+
+            // G2 LABS: this callback is the echo of our own cancel of the surviving arm below.
+            // Its state was already reset and its reconnect is already pending — handling it
+            // again would drop the fresh pending-connect references.
+            if self.pairedArmCancelIds.remove(peripheral.identifier) != nil {
+                Bridge.log("G2: \(side) cancel echo after paired-arm reset; reconnect already pending")
+                return
+            }
+
+            // G2 LABS root-cause fix (incomplete auto-reconnect): when ONE arm drops, the other
+            // is usually still connected at the iOS level. Clearing its characteristics/init flags
+            // while leaving that link up produced a zombie arm: a later connect() on an
+            // already-connected peripheral does not re-run didConnect → service discovery → auth,
+            // so the session never reached fullyBooted again. Cancel the surviving arm so BOTH arms
+            // rejoin through the identical, deterministic path.
+            for survivor in [self.leftPeripheral, self.rightPeripheral] {
+                guard let survivor, survivor.identifier != peripheral.identifier else { continue }
+                if survivor.state == .connected || survivor.state == .connecting {
+                    self.pairedArmCancelIds.insert(survivor.identifier)
+                    self.centralManager?.cancelPeripheralConnection(survivor)
+                    Bridge.log("G2: cancelling surviving arm \(survivor.name ?? "?") for a clean paired reconnect")
+                }
+            }
 
             // Clear both sides to force re-discovery (like G1)
             self.leftPeripheral = nil
