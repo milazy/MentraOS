@@ -12,6 +12,7 @@ on:
       - g2-labs-3.1.3-search-v2
       - g2-labs-3.1.4-integrated-ui-library
       - g2-labs-3.1.5-polish-models-captions
+      - g2-labs-3.2-dev
     paths:
       - "mobile/**"
       - "miniapps/captions/**"
@@ -56,6 +57,12 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+
+      # Cheap gate before the 40+ minute macOS build: the on-glasses navigation
+      # state machine is dependency-free and must stay green.
+      - name: G2 LABS navigation regression tests
+        working-directory: mobile/modules/engine
+        run: bun test src/services/__tests__/G2GlassesNavigator.test.ts
 
       - name: Build G2 LABS offline Captions bundle
         env:
@@ -214,13 +221,16 @@ jobs:
           IPA="G2_Glasses_v${VERSION}_unsigned.ipa"
           zip -qry "$IPA" Payload
           rm -rf Payload
+          shasum -a 256 "$IPA" | tee "$IPA.sha256"
           ls -lh "$IPA"
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
           name: G2_Glasses_v${{ steps.g2_version.outputs.version }}_unsigned_IPA
-          path: mobile/G2_Glasses_v*_unsigned.ipa
+          path: |
+            mobile/G2_Glasses_v*_unsigned.ipa
+            mobile/G2_Glasses_v*_unsigned.ipa.sha256
           if-no-files-found: error
           retention-days: 14
 

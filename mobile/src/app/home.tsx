@@ -284,7 +284,7 @@ export default function G2LabsHome() {
                 G2 Glasses
               </RNText>
               <RNText style={{color: "#74677F", fontSize: 11, marginTop: 2, letterSpacing: 1.3}}>
-                GIACOMO MILANESI’S G2 GLASSES
+                OFFLINE CAPTIONS · G2
               </RNText>
             </View>
           </View>
