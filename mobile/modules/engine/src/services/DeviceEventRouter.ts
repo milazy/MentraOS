@@ -24,12 +24,13 @@ import localSttFallbackCoordinator from "./LocalSttFallbackCoordinator"
 import {phonePhotoCoordinator} from "./PhonePhotoCoordinator"
 import {phoneStreamCoordinator} from "./PhoneStreamCoordinator"
 import {isGlassesConnected} from "./GlassesReadiness"
-import {useGlassesStore} from "../stores/glasses"
+import {selectGlassesReady, useGlassesStore} from "../stores/glasses"
 import {useSettingsStore} from "../stores/settings"
 import {useAppStatusStore} from "../stores/apps"
 import {retirePendingSelectionOnPromotion} from "./PairingIdentity"
 import GlobalEventEmitter from "../utils/GlobalEventEmitter"
 import {asgCameraApi} from "./asg/asgCameraApi"
+import g2GlassesShell from "./G2GlassesShell"
 import g2SpeechQuickMenu from "./G2SpeechQuickMenu"
 import {G2_SPEECH_MENU_PACKAGE} from "./G2SpeechQuickMenuConstants"
 
@@ -49,30 +50,6 @@ async function syncG2CaptionsNativeState(active: boolean): Promise<void> {
   }
 }
 
-async function toggleG2CaptionsFromGlasses(): Promise<void> {
-  const store = useAppStatusStore.getState()
-  let app = store.apps.find((candidate) => candidate.packageName === G2_CAPTIONS_PACKAGE)
-
-  if (!app) {
-    await store.refresh()
-    app = useAppStatusStore.getState().apps.find((candidate) => candidate.packageName === G2_CAPTIONS_PACKAGE)
-  }
-  if (!app) {
-    console.warn("G2 Captions: bundled Captions miniapp is not installed")
-    return
-  }
-
-  if (app.running) {
-    await useAppStatusStore.getState().stop(G2_CAPTIONS_PACKAGE)
-    await Promise.resolve(BluetoothSdk.clearDisplay()).catch(() => undefined)
-    await syncG2CaptionsNativeState(false)
-    return
-  }
-
-  const started = await useAppStatusStore.getState().start(app, {skipNavigation: true})
-  await syncG2CaptionsNativeState(started)
-}
-
 export function startDeviceEventRouter(): void {
   if (subs.length) return
 
@@ -88,6 +65,19 @@ export function startDeviceEventRouter(): void {
       if (running === previousCaptionsRunning) return
       previousCaptionsRunning = running
       void syncG2CaptionsNativeState(running)
+    }),
+  })
+
+  // Keep the on-glasses menu position across a Bluetooth drop: snapshot on
+  // loss of readiness, restore once both arms are booted again.
+  let previousGlassesReady = selectGlassesReady(useGlassesStore.getState())
+  subs.push({
+    remove: useGlassesStore.subscribe((state) => {
+      const ready = selectGlassesReady(state)
+      if (ready === previousGlassesReady) return
+      previousGlassesReady = ready
+      if (ready) void g2GlassesShell.onReconnected()
+      else g2GlassesShell.onDisconnected()
     }),
   })
 
@@ -236,19 +226,29 @@ export function startDeviceEventRouter(): void {
   )
   subs.push(
     BluetoothSdk.addListener("touch_event", (event) => {
-      // While the on-glasses Captions engine submenu is open, its swipe/tap
-      // gestures are consumed here and never leak into a paused miniapp.
+      // On-glasses menus consume their gestures so nothing leaks into a miniapp.
+      if (g2GlassesShell.handleTouch(event)) return
       if (g2SpeechQuickMenu.handleTouch(event)) return
 
-      if (process.env.EXPO_PUBLIC_G2_LABS === "1" && event.gestureName === "double_tap") {
+      if (process.env.EXPO_PUBLIC_G2_LABS === "1") {
         const captionsRunning =
           useAppStatusStore.getState().apps.find((app) => app.packageName === G2_CAPTIONS_PACKAGE)?.running === true
 
-        // Native G2 owns the first double tap as dashboard open. While Captions
-        // is active native suppresses that dashboard and this same event becomes
-        // STOP + CLOSE.
-        if (captionsRunning) void toggleG2CaptionsFromGlasses()
-        return
+        // Native G2 owns double tap as "open dashboard" while Captions is off.
+        // While Captions runs, native suppresses the dashboard and the same
+        // double tap opens the G2 LABS overlay menu ON TOP of live captions —
+        // recognition keeps running (3.1.x stopped Captions here, so one
+        // accidental double tap silently ended captioning for a deaf user).
+        if (event.gestureName === "double_tap") {
+          if (captionsRunning) void g2GlassesShell.open()
+          return
+        }
+        // Long press (newer firmware only) opens Home from anywhere.
+        if (event.gestureName === "long_press") {
+          void g2GlassesShell.open()
+          return
+        }
+        if (event.gestureName === "long_press_release") return
       }
 
       localMiniappRuntime.forwardEvent("touch_event", event)
@@ -292,10 +292,11 @@ export function startDeviceEventRouter(): void {
       if (!packageName) return
 
       if (packageName === G2_SPEECH_MENU_PACKAGE) {
-        // The native dashboard item is named "Captions". Selecting it opens a
-        // second-level on-glasses engine chooser: Mentra Cloud, Sherpa, or
-        // ExecuTorch Whisper Tiny/Base/Small.
-        void g2SpeechQuickMenu.open()
+        // The native dashboard item is named "Captions". Selecting it opens
+        // the G2 LABS Home: Live Captions first, then Quick Settings, the
+        // speech-engine chooser (Cloud / Sherpa / ExecuTorch Whisper), apps
+        // and status.
+        void g2GlassesShell.open()
         return
       }
 
