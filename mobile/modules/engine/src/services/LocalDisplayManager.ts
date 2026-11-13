@@ -27,6 +27,7 @@
  */
 
 import BluetoothSdk from "@mentra/bluetooth-sdk/internal"
+import displayHold from "./DisplayHold"
 import displayProcessor from "./DisplayProcessor"
 import {useDisplayStore} from "../stores/display"
 import sceneRenderer from "./SceneRenderer"
@@ -535,6 +536,22 @@ class LocalDisplayManager {
       processedEvent = rawEvent
     }
 
+    // G2 LABS overlay / pause: keep state (currentDisplay, expiry) but do not
+    // overwrite the on-glasses menu — including expiry clears.
+    if (displayHold.isHeld() && processedEvent.view !== "dashboard") {
+      displayHold.noteSuppressed(packageName)
+      this.currentDisplay = {packageName, processedEvent, expiresAt}
+      this.clearExpiryTimer()
+      if (expiresAt !== null) {
+        const delay = Math.max(0, expiresAt - this.now())
+        this.expiryTimerId = BgTimer.setTimeout(() => {
+          this.expiryTimerId = null
+          this.handleExpiry(packageName)
+        }, delay)
+      }
+      return
+    }
+
     try {
       // The display output path is a direct btsdk call now (was a host sendDisplayEvent
       // hook) so a bare OEM renders to the glasses without wiring it.
@@ -719,10 +736,10 @@ class LocalDisplayManager {
    * from SceneRenderer's retained state (create-based, epoch-bumped); legacy
    * frames re-send their processed event. Expired frames don't come back.
    */
-  public replayCurrent(): void {
+  public replayCurrent(): boolean {
     const current = this.currentDisplay
-    if (!current) return
-    if (current.expiresAt !== null && this.now() >= current.expiresAt) return
+    if (!current) return false
+    if (current.expiresAt !== null && this.now() >= current.expiresAt) return false
 
     console.log(`${LOG_TAG}: replayCurrent(${current.packageName})`)
     if (current.scene) {
@@ -732,7 +749,10 @@ class LocalDisplayManager {
       }
     } else if (current.processedEvent.layout) {
       this.sendToNative(current.packageName, current.processedEvent, current.expiresAt)
+    } else {
+      return false
     }
+    return true
   }
 
   // ===========================================================================

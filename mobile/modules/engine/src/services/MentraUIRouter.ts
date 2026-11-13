@@ -222,6 +222,18 @@ export class MentraUIRouter {
   }
 
   /**
+   * Trusted host → background message on a miniapp's UI channel, delivered
+   * exactly like a WebView `mentra.send(channel, payload)` broadcast. The
+   * background SDK fans UI_MESSAGE broadcasts out to `session.ui.on` handlers
+   * whether or not a WebView is bound, so device affordances (the G2 on-glasses
+   * menu) can change a running miniapp's settings without mounting its UI.
+   * Never exposed to miniapps themselves.
+   */
+  sendHostMessage(packageName: string, channel: string, payload: unknown): void {
+    this.deliverToBackground(packageName, {type: "UI_MESSAGE", channel, payload, seq: 0})
+  }
+
+  /**
    * Wrap an EVENT envelope and push it to background via the bridge.
    * Background's UIModule listens for stream `_ui`. The `type` is the
    * wire value `miniapp_event` — must match `MiniappResponseType.EVENT`

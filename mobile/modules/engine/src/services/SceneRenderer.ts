@@ -13,6 +13,8 @@
 
 import displayProcessor from "./DisplayProcessor"
 import BluetoothSdk from "@mentra/bluetooth-sdk/internal"
+
+import displayHold from "./DisplayHold"
 import {useDisplayStore} from "../stores/display"
 import {SETTINGS, useSettingsStore} from "../stores/settings"
 import {useGlassesStore} from "../stores/glasses"
@@ -264,6 +266,14 @@ class SceneRenderer {
   }
 
   private sendFrame(frame: SceneFrame): void {
+    // G2 LABS overlay / pause: the frame is already committed to the retained
+    // store (so diffing + replay stay correct) but the glasses keep showing the
+    // host menu. The host replays the retained frame when the hold ends.
+    if (frame.view === "main" && displayHold.isHeld()) {
+      displayHold.noteSuppressed(frame.appId)
+      this.store.markViewStale("main")
+      return
+    }
     try {
       // Only actual Captions scene frames count as the final G2 benchmark stage.
       // This avoids system boot/clear frames making a dead caption pipeline look healthy.
