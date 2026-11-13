@@ -28,9 +28,12 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-26
+    # macos-26 runners repeatedly could not be acquired (GitHub capacity).
+    # Use upstream MentraOS's proven iOS pool: macos-15 with Xcode 26.2.
+    runs-on: macos-15
     timeout-minutes: 90
     env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
       G2_ACCESS_BUILD: "1"
       EXPO_PUBLIC_BUILD_ENV: dev
       EXPO_PUBLIC_G2_LABS: "1"
@@ -40,6 +43,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Show Xcode
+        run: xcodebuild -version
 
       - name: Read G2 LABS version
         id: g2_version
