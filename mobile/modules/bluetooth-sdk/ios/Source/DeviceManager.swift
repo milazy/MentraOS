@@ -409,6 +409,15 @@ struct ViewState {
             name: UIApplication.didBecomeActiveNotification,
             object: nil
         )
+        // A call/Siri stops the background keepalive engine. Without this observer the dead
+        // engine stayed non-nil, so the guard in start…IfNeeded() blocked every restart until
+        // the app returned to the foreground — locked-phone captions stopped after any call.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleG2LabsAudioInterruption(_:)),
+            name: AVAudioSession.interruptionNotification,
+            object: nil
+        )
 
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
@@ -428,6 +437,29 @@ struct ViewState {
 
     @objc private func handleG2LabsDidBecomeActive() {
         stopG2BackgroundExecutionKeepalive()
+    }
+
+    @objc private func handleG2LabsAudioInterruption(_ notification: Notification) {
+        guard let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: raw)
+        else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            switch type {
+            case .began:
+                if self.g2BackgroundExecutionEngine != nil {
+                    Bridge.log("G2LAB_BG: keepalive engine interrupted")
+                    self.stopG2BackgroundExecutionKeepalive()
+                }
+            case .ended:
+                if UIApplication.shared.applicationState != .active {
+                    Bridge.log("G2LAB_BG: interruption ended in background; restarting keepalive")
+                    self.startG2BackgroundExecutionKeepaliveIfNeeded()
+                }
+            @unknown default:
+                break
+            }
+        }
     }
 
     private func startG2BackgroundExecutionKeepaliveIfNeeded() {

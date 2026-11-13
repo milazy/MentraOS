@@ -46,6 +46,25 @@ class PhoneMic {
             name: AVAudioSession.interruptionNotification,
             object: nil
         )
+
+        // G2 LABS: when iOS restarts its media server every AVAudioEngine/session object is
+        // invalidated without an interruption-ended event. Treat it as a full interruption cycle.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleMediaServicesReset),
+            name: AVAudioSession.mediaServicesWereResetNotification,
+            object: nil
+        )
+    }
+
+    @objc private func handleMediaServicesReset(notification _: Notification) {
+        Bridge.log("Audio media services were reset; rebuilding mic session")
+        _isRecording = false
+        currentMicMode = ""
+        DispatchQueue.main.async {
+            DeviceManager.shared.onInterruption(began: true)
+            DeviceManager.shared.onInterruption(began: false)
+        }
     }
 
     deinit {
@@ -336,13 +355,14 @@ class PhoneMic {
                 DeviceManager.shared.onInterruption(began: true)
             }
         case .ended:
-            Bridge.log("Audio session interruption ended")
-            if let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt {
-                let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
-                if options.contains(.shouldResume) {
-                    DeviceManager.shared.onInterruption(began: false)
-                }
-            }
+            let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            let shouldResume = AVAudioSession.InterruptionOptions(rawValue: optionsValue).contains(.shouldResume)
+            // G2 LABS root-cause fix: iOS frequently omits .shouldResume (Siri, many calls,
+            // other recording apps). Gating on it left live captions silently dead after the
+            // interruption. Captions are an accessibility service the user explicitly enabled,
+            // so always try to re-arm; DeviceManager only restarts if mic intent is still on.
+            Bridge.log("Audio session interruption ended (shouldResume=\(shouldResume)); re-arming mic")
+            DeviceManager.shared.onInterruption(began: false)
         @unknown default:
             break
         }
