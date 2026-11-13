@@ -18,6 +18,11 @@ on:
       - "miniapps/captions/**"
       - ".github/workflows/g2-access-ios-unsigned.yml"
   workflow_dispatch:
+    inputs:
+      runner:
+        description: "Hosted macOS runner label"
+        required: false
+        default: macos-15-intel
 
 permissions:
   contents: read
@@ -28,12 +33,12 @@ concurrency:
 
 jobs:
   build:
-    # macos-26 runners repeatedly could not be acquired (GitHub capacity).
-    # Use upstream MentraOS's proven iOS pool: macos-15 with Xcode 26.2.
-    runs-on: macos-15
-    timeout-minutes: 90
+    # macOS arm64 hosted runners (macos-26, macos-15) repeatedly could not be
+    # acquired ("not acquired by Runner ... capacity constraints"). Intel is a
+    # separate pool; slower, so allow more time.
+    runs-on: ${{ inputs.runner || 'macos-15-intel' }}
+    timeout-minutes: 150
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
       G2_ACCESS_BUILD: "1"
       EXPO_PUBLIC_BUILD_ENV: dev
       EXPO_PUBLIC_G2_LABS: "1"
@@ -44,8 +49,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Show Xcode
-        run: xcodebuild -version
+      - name: Select newest Xcode 26
+        run: |
+          set -euo pipefail
+          XC="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)"
+          if [ -n "$XC" ]; then sudo xcode-select -s "$XC/Contents/Developer"; fi
+          xcodebuild -version
+          uname -m
 
       - name: Read G2 LABS version
         id: g2_version
